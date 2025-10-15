@@ -575,18 +575,241 @@ Task 3 completion when:
 5.  Your `app.py` is updated to import and call `extract_job_details` instead of the placeholder function. The "Edit and Confirm" form now populates with real extracted data.
 
 ---
+Of course. Let's break down **Task 4: Deduplication and Data Persistence** into a detailed implementation guide.
 
-**Task 4: Deduplication and Data Persistence**
+This task is about connecting your application's logic to its memory—the database. We will focus on two critical principles: **safety** (preventing bad data and duplicates) and **modularity** (keeping database code separate from application logic). Creating a dedicated `db_utils.py` module is a professional standard that makes your code cleaner, easier to test, and more maintainable.
 
-*   **4.1. Implementation Steps:**
-    *   In `processing.py`, create a `hash_description(text)` function using `hashlib`.
-    *   Create a database utility module (e.g., `db_utils.py`) to handle all database connections and queries. This avoids putting SQL in your main logic.
-    *   Implement a `check_for_duplicate(description_hash)` function that queries the database.
-    *   Implement an `insert_job_listing(job_listing_object)` function that inserts the validated data into the `job_listings` table.
-*   **4.2. Definition of Done:**
-    *   The `check_for_duplicate` function correctly returns `True` if a hash exists and `False` otherwise.
-    *   The `insert_job_listing` function successfully saves a new record to the database.
-    *   The Streamlit app provides clear feedback (`st.success` for new records, `st.warning` for duplicates).
+---
+
+### **Task 4: Deduplication and Data Persistence — Step-by-Step Implementation**
+
+**Objective:** To create a robust data persistence layer that first hashes and checks for duplicate job listings before safely inserting new, unique records into the PostgreSQL database.
+
+---
+
+#### **Step 4.1: Implement the Hashing Function in `processing.py`**
+
+*   **Goal:** To create a reliable, deterministic function that converts the core job description text into a unique signature (a hash) for exact duplicate detection.
+
+*   **Instructions & Pseudocode:**
+    1.  Open the `processing.py` file you created in Task 3.
+    2.  Import the `hashlib` library.
+    3.  Create a new public function `hash_description`.
+    4.  **Normalization is key:** Inside the function, before hashing, you must normalize the text. A good starting point is to convert it to lowercase and remove all whitespace. This ensures that minor formatting changes don't result in a different hash.
+    5.  Hash functions operate on bytes, so encode the normalized string to `utf-8`.
+    6.  Use the SHA-256 algorithm to generate the hash and return its hexadecimal representation.
+
+    ```python
+    # In processing.py
+    import hashlib
+    # ... other imports from Task 3 ...
+
+    # --- HASHING UTILITY ---
+    # This function creates a unique, consistent fingerprint for a job description.
+
+    def hash_description(text: str) -> str:
+        """
+        Normalizes and hashes a string using SHA-256 to create a unique identifier.
+        """
+        # 1. Normalize: Lowercase and remove all whitespace characters.
+        normalized_text = "".join(text.lower().split())
+
+        # 2. Encode: Convert the string to bytes, as required by hashlib.
+        encoded_text = normalized_text.encode('utf-8')
+
+        # 3. Hash: Compute the SHA-256 hash.
+        hasher = hashlib.sha256(encoded_text)
+
+        # 4. Return: Get the hexadecimal string representation of the hash.
+        return hasher.hexdigest()
+    ```
+
+---
+
+#### **Step 4.2: Create the Database Utility Module (`db_utils.py`)**
+
+*   **Goal:** To create a centralized, self-contained module for all database interactions. This module will be responsible for handling connections, credentials, and executing queries, completely abstracting these details from `app.py`.
+
+*   **Instructions & Pseudocode:**
+    1.  Create a new file in your project's root directory named `db_utils.py`.
+    2.  Import `psycopg2`, `os`, and `dotenv`.
+    3.  Create a private helper function, `_get_db_connection`, that reads database credentials from your `.env` file and establishes a connection. This centralizes the connection logic.
+    4.  Your `.env` file should look like this:
+        ```env
+        DB_NAME="your_db"
+        DB_USER="your_user"
+        DB_PASSWORD="your_password"
+        DB_HOST="localhost"
+        DB_PORT="5432"
+        ```
+
+    ```python
+    # In db_utils.py
+    import os
+    import psycopg2
+    from dotenv import load_dotenv
+    from typing import Optional
+
+    # Import the JobListing dataclass to use for type hinting.
+    # Note: You might need to adjust the import path depending on your structure.
+    from processing import JobListing
+
+    # --- 1. SETUP AND CONNECTION ---
+    load_dotenv() # Load variables from the .env file
+
+    def _get_db_connection():
+        """
+        Establishes and returns a connection to the PostgreSQL database.
+        Returns None if connection fails.
+        """
+        try:
+            conn = psycopg2.connect(
+                dbname=os.getenv("DB_NAME"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                host=os.getenv("DB_HOST"),
+                port=os.getenv("DB_PORT")
+            )
+            return conn
+        except psycopg2.OperationalError as e:
+            # In a real app, you would log this error.
+            print(f"Error: Could not connect to the database. {e}")
+            return None
+    ```
+
+---
+
+#### **Step 4.3: Implement the Duplicate Check and Insertion Functions in `db_utils.py`**
+
+*   **Goal:** To create the two main public functions of this module: one to check if a hash exists and one to insert a new record. We will use best practices like context managers (`with`) and parameterized queries to prevent SQL injection.
+
+*   **Instructions & Pseudocode:**
+    1.  In `db_utils.py`, define the `check_for_duplicate` function. It takes the hash and returns a boolean.
+    2.  Use `_get_db_connection()` to get a connection.
+    3.  Use `with conn.cursor() as cur:` to ensure the cursor is properly closed.
+    4.  Execute a `SELECT 1 ...` query, which is more efficient than `SELECT *`.
+    5.  **Crucially, use placeholders (`%s`) for the hash value.** This lets the database driver safely handle the input, preventing SQL injection attacks.
+    6.  Define the `insert_job_listing` function. It should accept the `JobListing` object from Task 3 and the generated hash.
+    7.  Follow a similar pattern, but use an `INSERT` statement. The order of columns in your `INSERT` statement *must* match the order of values in the tuple you provide to `cur.execute()`.
+    8.  After executing the `INSERT`, you must call `conn.commit()` to save the transaction to the database.
+
+    ```python
+    # In db_utils.py (continued)
+
+    # --- 2. PUBLIC DATABASE FUNCTIONS ---
+
+    def check_for_duplicate(description_hash: str) -> bool:
+        """
+        Checks if a job listing with the given hash already exists.
+        """
+        conn = _get_db_connection()
+        if not conn: return False # Or raise an exception
+
+        is_duplicate = False
+        try:
+            # Using a context manager ensures the cursor and connection are closed.
+            with conn.cursor() as cur:
+                # Use parameterized query to prevent SQL injection.
+                sql = "SELECT 1 FROM job_listings WHERE description_hash = %s;"
+                cur.execute(sql, (description_hash,))
+                # fetchone() returns a tuple if a row is found, otherwise None.
+                is_duplicate = cur.fetchone() is not None
+        finally:
+            conn.close()
+        return is_duplicate
+
+    def insert_job_listing(job: JobListing, job_hash: str):
+        """
+        Inserts a new job listing record into the database.
+        """
+        conn = _get_db_connection()
+        if not conn: return
+
+        try:
+            with conn.cursor() as cur:
+                sql = """
+                    INSERT INTO job_listings (job_title, company, location, apply_url, description, description_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """
+                # The tuple of values MUST match the order of columns in the SQL statement.
+                values = (job.job_title, job.company, job.location, job.apply_url, job.description, job_hash)
+                cur.execute(sql, values)
+                # Commit the transaction to make the changes permanent.
+                conn.commit()
+        except Exception as e:
+            # If anything goes wrong, roll back the transaction.
+            print(f"Database insert failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+    ```
+
+---
+
+#### **Step 4.4: Integrate Persistence Logic into the Streamlit App (`app.py`)**
+
+*   **Goal:** To call our new hashing and database functions from the Streamlit UI when the user clicks the "Confirm and Save" button.
+
+*   **Instructions & Pseudocode:**
+    1.  Open `app.py`. Import the necessary functions: `hash_description` from `processing` and the functions from `db_utils`.
+    2.  Navigate to the section for the "Edit and Confirm" form, inside the `if confirm_button:` block.
+    3.  First, gather the potentially edited data from the form fields.
+    4.  Use this data to create a final `JobListing` object.
+    5.  Generate the hash using the *original, full description text* to ensure consistency.
+    6.  Call `db_utils.check_for_duplicate()`.
+    7.  Based on the boolean result, either call `db_utils.insert_job_listing()` and show a success message, or show a warning message for duplicates.
+
+    ```python
+    # In app.py
+    # ... inside the "if st.session_state.processed_data:" block ...
+    # ... inside the "with st.form(...)" block ...
+
+    # from processing import hash_description, JobListing
+    # import db_utils
+
+    if confirm_button:
+        # 1. Gather the final, user-verified data from the form fields.
+        final_job_data = JobListing(
+            job_title=edited_title,
+            company=edited_company,
+            location=edited_location,
+            apply_url=edited_url,
+            # Use the original full description from the session state.
+            description=st.session_state.processed_data['description']
+        )
+
+        # 2. Generate the hash from the full description.
+        description_hash = hash_description(final_job_data.description)
+
+        # 3. Check for duplicates before attempting to insert.
+        if db_utils.check_for_duplicate(description_hash):
+            st.warning("⚠️ This job listing is already in the database.")
+        else:
+            # 4. If not a duplicate, insert the data.
+            try:
+                db_utils.insert_job_listing(final_job_data, description_hash)
+                st.success("✅ Job listing saved successfully!")
+            except Exception as e:
+                st.error(f"An error occurred while saving: {e}")
+
+        # 5. Reset the state to return to the initial UI.
+        st.session_state.processed_data = None
+        st.session_state.job_text_input = ""
+        st.rerun()
+    ```
+
+---
+
+### **Verification and Definition of Done for Task 4**
+
+You have successfully completed Task 4 when:
+
+1.  The `check_for_duplicate` function correctly queries the database and returns `True` for a hash that exists and `False` for one that does not.
+2.  The `insert_job_listing` function successfully writes a new row to the `job_listings` table, and the data can be verified using a SQL client.
+3.  In the Streamlit app, clicking "Confirm and Save" for a new job results in a success message and a new database entry.
+4.  Submitting the exact same job description a second time results in the duplicate warning message and does *not* create a new database entry.
+
+---
 
 **Task 5: Testing Strategy**
 
