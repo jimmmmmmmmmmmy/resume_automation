@@ -398,23 +398,181 @@ Task 2 is complete when:
 
 ---
 
-**Task 3: Information Extraction Service**
+Excellent. Let's dive deep into **Task 3: Information Extraction Service**.
 
-*   **3.1. Implementation Steps:**
-    *   Create a new file, `processing.py`.
-    *   Define a Pydantic model or a simple Python `dataclass` to represent a structured `JobListing`.
-    *   Implement the hybrid "fill-in-the-gaps" extraction function `extract_job_details(raw_text)` which:
-        1.  Initializes an empty `JobListing` object.
-        2.  Calls an internal `_extract_with_regex()` function to populate fields like URL, title, etc.
-        3.  For any remaining empty fields, calls an internal `_extract_with_spacy()` function.
-        4.  (Optional fallback) If key fields are still missing, calls an `_extract_with_llm()` function.
-    *   Each extraction function will return the values it finds, never overwriting an existing value.
-*   **3.2. Definition of Done:**
-    *   The `extract_job_details` function can be called with raw text and reliably returns a structured `JobListing` object.
-    *   **Unit tests are written** for the regex and spaCy extraction helpers to validate their accuracy on sample job descriptions.
-*   **3.3. Potential Risks:**
-    *   **Risk:** Regex patterns are too brittle.
-    *   **Mitigation:** Rely more heavily on the spaCy NER as the primary method if regex proves unreliable during testing.
+This task is the intellectual core of your Phase 1. It's where raw, messy text is transformed into clean, structured data. The hybrid "fill-in-the-gaps" approach is crucial for creating a system that is both efficient and robust. We'll design this as a self-contained service in `processing.py` that the Streamlit app can use as a black box.
+
+---
+
+### **Task 3: Information Extraction Service — Step-by-Step Implementation**
+
+**Objective:** Develop a modular service that takes raw text as input and returns a structured `JobListing` object, progressively populating its fields using a tiered extraction strategy (Regex, spaCy, LLM).
+
+---
+
+#### **Step 3.1: Create `processing.py` and Define the Data Structure**
+
+*   **Goal:** To establish a dedicated file for all backend logic and define a clear "contract" for what a structured job listing looks like using a Python `dataclass`. This is far superior to passing raw dictionaries around as it provides type hinting, auto-completion, and a single source of truth for your data's structure.
+
+*   **Instructions & Pseudocode:**
+    1.  Create a new file in your project's root directory named `processing.py`.
+    2.  At the top of this file, import the necessary libraries. We'll use the `dataclasses` module and `typing` for type hints.
+    3.  Define a `dataclass` named `JobListing`. The fields should mirror the columns in your database table. Using `Optional[str]` and `default=None` is key, as it allows us to create an instance that is initially empty and fill it in as we go.
+
+    ```python
+    # In processing.py
+    import re
+    import spacy
+    from dataclasses import dataclass, field
+    from typing import Optional, List
+
+    # --- 1. DATA STRUCTURE DEFINITION ---
+    # This dataclass acts as a structured container for our data.
+    # It ensures consistency throughout the extraction pipeline.
+
+    @dataclass
+    class JobListing:
+        job_title: Optional[str] = None
+        company: Optional[str] = None
+        location: Optional[str] = None
+        apply_url: Optional[str] = None
+        # The full description is not optional; it's the source of truth.
+        description: str = ""
+        # We can add other fields as needed later.
+    ```
+
+---
+
+#### **Step 3.2: Implement the Main Orchestrator Function (`extract_job_details`)**
+
+*   **Goal:** To create the single public function that `app.py` will call. This function acts as a manager, coordinating the calls to the different extraction layers in the correct order.
+
+*   **Instructions & Pseudocode:**
+    1.  In `processing.py`, define the main function `extract_job_details`.
+    2.  It takes the raw text as input and is type-hinted to return a `JobListing` object.
+    3.  Inside, it first initializes an empty `JobListing` object, passing the raw text to the `description` field.
+    4.  It then calls each private helper function sequentially, passing the `JobListing` object through each one. The object gets progressively enriched at each step.
+
+    ```python
+    # --- 2. MAIN ORCHESTRATOR ---
+    # This is the only function that app.py will need to import and call.
+
+    def extract_job_details(raw_text: str) -> JobListing:
+        """
+        Orchestrates the extraction process using a tiered approach.
+        """
+        # Initialize the data container with the raw description.
+        job = JobListing(description=raw_text)
+
+        # 1. First pass: Use fast and cheap Regex for well-structured data.
+        job = _extract_with_regex(raw_text, job)
+
+        # 2. Second pass: Use NLP (spaCy) to find entities if fields are still missing.
+        job = _extract_with_spacy(raw_text, job)
+
+        # 3. Final fallback: Use an LLM for very difficult cases (optional, stubbed for now).
+        # job = _extract_with_llm(raw_text, job)
+
+        return job
+    ```
+
+---
+
+#### **Step 3.3: Implement the Regex Extraction Layer (`_extract_with_regex`)**
+
+*   **Goal:** To perform a fast, first-pass extraction targeting explicitly labeled information (e.g., "Company: Acme Corp"). This is highly effective for job postings copied from professional sites.
+
+*   **Instructions & Pseudocode:**
+    1.  Define a private helper function `_extract_with_regex` that takes the text and the current `JobListing` object.
+    2.  Create a dictionary where keys are the field names in your `JobListing` and values are the compiled regex patterns. This is a clean and maintainable way to manage your patterns.
+    3.  Iterate through this dictionary. For each field, **first check if the field in the `job` object is already filled**. This is the core of the "fill-in-the-gaps" logic.
+    4.  If the field is empty, run the regex search. If a match is found, clean the result (e.g., `.strip()`) and update the `job` object.
+
+    ```python
+    # --- 3. EXTRACTION LAYER 1: REGULAR EXPRESSIONS ---
+
+    # Define patterns in a structured way.
+    REGEX_PATTERNS = {
+        'job_title': re.compile(r"Job Title:\s*(.*)", re.IGNORECASE),
+        'company': re.compile(r"Company:\s*(.*)", re.IGNORECASE),
+        'location': re.compile(r"Location:\s*(.*)", re.IGNORECASE),
+        'apply_url': re.compile(r"(https?://\S+apply\S*)", re.IGNORECASE)
+        # Add more patterns as you discover them.
+    }
+
+    def _extract_with_regex(raw_text: str, job: JobListing) -> JobListing:
+        """
+        Fills JobListing fields using predefined regex patterns.
+        """
+        for field, pattern in REGEX_PATTERNS.items():
+            # **FILL-IN-THE-GAPS LOGIC**: Only search if the field is not already populated.
+            if getattr(job, field) is None:
+                match = pattern.search(raw_text)
+                if match:
+                    # Update the dataclass field with the captured group.
+                    setattr(job, field, match.group(1).strip())
+        return job
+    ```
+
+---
+
+#### **Step 3.4: Implement the spaCy NER Layer (`_extract_with_spacy`)**
+
+*   **Goal:** To use a pre-trained Natural Language Processing model to identify entities like organizations (`ORG`) and locations (`GPE`) when the text is less structured and lacks explicit labels.
+
+*   **Instructions & Pseudocode:**
+    1.  At the top of `processing.py`, load the spaCy model. This is a heavy object, so you should load it only once when the module is imported to avoid slow performance.
+    2.  Define the private helper `_extract_with_spacy`.
+    3.  Just like with regex, **first check if the relevant fields (`company`, `location`) are empty**.
+    4.  If they are, process the text with the `nlp` object to create a `doc`.
+    5.  Iterate through the named entities (`doc.ents`). If you find an `ORG` entity and `job.company` is still `None`, assign it. Do the same for `GPE` and `job.location`.
+    6.  For simplicity, you can just take the first entity of each type that you find.
+
+    ```python
+    # --- 4. EXTRACTION LAYER 2: SPACY NER ---
+
+    # Load the model once at the module level for efficiency.
+    try:
+        NLP_MODEL = spacy.load("en_core_web_sm")
+    except OSError:
+        print("SpaCy model not found. Please run 'python -m spacy download en_core_web_sm'")
+        NLP_MODEL = None
+
+    def _extract_with_spacy(raw_text: str, job: JobListing) -> JobListing:
+        """
+        Uses spaCy's Named Entity Recognition (NER) to find missing details.
+        """
+        if NLP_MODEL is None:
+            return job # Don't proceed if the model failed to load.
+            
+        # Only process the text if there's something to look for.
+        if job.company is None or job.location is None:
+            doc = NLP_MODEL(raw_text)
+            for ent in doc.ents:
+                # If company is missing and we find an Organization...
+                if job.company is None and ent.label_ == "ORG":
+                    job.company = ent.text.strip()
+                # If location is missing and we find a Geo-Political Entity...
+                if job.location is None and ent.label_ == "GPE":
+                    job.location = ent.text.strip()
+
+        return job
+    ```
+
+---
+
+### **Verification and Definition of Done for Task 3**
+
+Task 3 completion when:
+
+1.  The `processing.py` file contains the `JobListing` dataclass and the `extract_job_details` function.
+2.  Calling `extract_job_details` with a well-formatted job description (containing labels like "Company:") returns a `JobListing` object correctly populated by the regex layer.
+3.  Calling it with a poorly-formatted job description (e.g., a simple paragraph) returns an object correctly populated by the spaCy layer.
+4.  **Unit Tests are Written:**
+    *   You have a separate test file (e.g., `test_processing.py`).
+    *   One test asserts that a sample text with "Company: Test Inc." correctly extracts "Test Inc." via regex.
+    *   Another test asserts that a sample text like "We are FutureTech, a leading innovator..." correctly extracts "FutureTech" via spaCy when the regex fails.
+5.  Your `app.py` is updated to import and call `extract_job_details` instead of the placeholder function. The "Edit and Confirm" form now populates with real extracted data.
 
 ---
 
