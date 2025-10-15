@@ -691,11 +691,11 @@ Task 3 is complete when:
 
         # 3. Check for duplicates and persist the data if unique.
         if db_utils.check_for_duplicate(description_hash):
-            st.warning("⚠️ This job listing is already in the database.")
+            st.warning("This job listing is already in the database.")
         else:
             try:
                 db_utils.insert_job_listing(final_job_data, description_hash)
-                st.success("✅ Job listing saved successfully!")
+                st.success("Job listing saved successfully!")
             except Exception as e:
                 st.error(f"An error occurred while saving: {e}")
 
