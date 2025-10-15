@@ -31,6 +31,18 @@ Note each task has a clear `Definition of Done`.
 
 Executing Task 1 correctly ensures a clean, organized, and reproducible development environment.
 
+*   **Concepts Introduced:**
+    *   **Version Control (Git):** The practice of tracking and managing changes to software code. `git init` creates a new repository.
+    *   **Dependency Management (`venv`, `pip`, `requirements.txt`):** Creating isolated environments (`venv`) to manage project-specific libraries, installed via `pip`, and locking their versions in a `requirements.txt` file for reproducibility.
+    *   **Environment Configuration (`.env`, `.gitignore`):** Separating sensitive information (like database passwords) into a local `.env` file and telling Git to ignore it with `.gitignore` to prevent committing secrets to version control.
+    *   **Database Schema Design (SQL DDL):** Using Data Definition Language (DDL) in SQL to define the structure of your database tables, columns, and data types.
+
+*   **Things to Research Further:**
+    *   "Git branching strategies" (like GitFlow) to understand how teams collaborate.
+    *   "Python virtual environments explained" to grasp why they are crucial.
+    *   "SQL data types" (e.g., `VARCHAR`, `TEXT`, `TIMESTAMPTZ`, `JSONB`) to understand the choices made in the schema.
+    *   "What is an idempotent SQL script?" (The use of `DROP TABLE IF EXISTS` makes our script safely re-runnable).
+
 ---
 
 #### **Step 1.1: Initialize the Git Repository**
@@ -230,6 +242,18 @@ Task 1 is completed when:
 
 **Objective:** To build a user interface that guides the user through pasting job text, processing it, and then verifying the extracted information before final submission.
 
+*   **Concepts Introduced:**
+    *   **Declarative UI Frameworks (Streamlit):** Building user interfaces by describing *what* should be displayed, and letting the framework handle *how* it gets rendered and updated.
+    *   **State Management (`st.session_state`):** The mechanism for preserving information across user interactions. Since Streamlit re-runs the entire script on every action, `session_state` is essential for creating multi-step workflows.
+    *   **Event-Driven Programming:** The application's flow is determined by user events like button clicks. The `if process_button:` block is a simple example of an event handler.
+    *   **Conditional Rendering:** The practice of showing or hiding UI elements based on the current state of the application (e.g., the verification form only appears after data has been processed).
+
+*   **Things to Research Further:**
+    *   "How Streamlit works" to understand its script-rerun model.
+    *   "Streamlit session state tutorial" for more advanced examples.
+    *   "Declarative vs. Imperative UI programming" to appreciate the paradigm Streamlit uses.
+    *   "Using Forms in Streamlit" to see how to group inputs to be submitted together.
+      
 ---
 
 #### **Step 2.1: Initialize the Streamlit App and Session State (app.py)**
@@ -396,6 +420,21 @@ Task 2 is complete when:
 
 **Objective:** To develop a modular service that takes raw text as input and returns a structured `JobListing` object, progressively populating its fields using a tiered extraction strategy (Regex, spaCy). This module will import its core data structure from a central `models.py` file to ensure architectural integrity and prevent circular dependencies.
 
+*   **Concepts Introduced:**
+    *   **Separation of Concerns:** Creating a dedicated `processing.py` module for business logic, keeping it separate from the UI (`app.py`) and database (`db_utils.py`) code. This makes the system easier to maintain and test.
+    *   **Data Modeling (`dataclasses`):** Using Python's `dataclass` to create a structured, type-hinted "schema" for your data. This is more robust and self-documenting than using plain dictionaries.
+    *   **Regular Expressions (Regex):** A powerful tool for finding patterns in text. Ideal for fast, precise extraction when the text format is predictable.
+    *   **Natural Language Processing (NLP) & Named Entity Recognition (NER):** Using a library like spaCy to understand the *meaning* of text and identify real-world entities like organizations (`ORG`) and locations (`GPE`).
+    *   **Architectural Patterns (Orchestrator):** The `extract_job_details` function acts as an "orchestrator" or "manager," coordinating the work of smaller, specialized helper functions (`_extract_with_regex`, `_extract_with_spacy`).
+
+*   **Things to Research Further:**
+    *   "Python dataclasses vs dictionaries" to understand the benefits.
+    *   "Regex tutorial for Python" (sites like regex101.com are excellent for interactive learning).
+    *   "What is Named Entity Recognition (NER)?"
+    *   "spaCy 101" to learn about its capabilities beyond NER (like tokenization and part-of-speech tagging).
+    *   "Circular dependencies in Python" to understand why creating `models.py` is a good architectural decision.
+
+
 ---
 
 #### **Step 3.1: Create the Central Data Model (`models.py`)**
@@ -557,6 +596,19 @@ Task 3 is complete when:
 
 **Objective:** To create a robust, modular data persistence layer in a dedicated `db_utils.py` file. This service will connect to the PostgreSQL database, check for duplicate entries using the hash generated by `processing.py`, and safely insert new, unique records.
 
+*   **Concepts Introduced:**
+    *   **Database Abstraction Layer:** Creating `db_utils.py` acts as a simple abstraction layer. `app.py` doesn't need to know *how* to connect to or query the database; it just calls functions like `insert_job_listing()`.
+    *   **Cryptographic Hashing (SHA-256):** A one-way function that turns an input (the job description) into a unique, fixed-size string (the hash). It's used here to create a reliable "fingerprint" for deduplication.
+    *   **Data Normalization:** The process of cleaning and standardizing data *before* processing it (e.g., converting text to lowercase and removing whitespace before hashing) to ensure consistency.
+    *   **SQL Injection Prevention:** Using parameterized queries (`cur.execute(sql, values)`) is the most critical security practice for database programming. It treats user data as data, never as executable code.
+    *   **Database Transactions (Commit/Rollback):** An `INSERT` operation is not permanent until `conn.commit()` is called. If an error occurs, `conn.rollback()` can undo the changes, ensuring the database remains in a consistent state.
+
+*   **Things to Research Further:**
+    *   "What is SQL Injection and how to prevent it?"
+    *   "SHA-256 Hashing explained."
+    *   "Python `psycopg2` tutorial" for more advanced usage.
+    *   "Database Transactions and ACID properties (Atomicity, Consistency, Isolation, Durability)."
+    *   
 ---
 
 #### **Step 4.1: Create the Database Utility Module (`db_utils.py`)**
