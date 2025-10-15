@@ -226,23 +226,175 @@ Task 1 is completed when:
 
 ---
 
-**Task 2: Streamlit UI and User Workflow**
+Of course. Let's expand on **Task 2: Streamlit UI and User Workflow** with a detailed, step-by-step guide.
 
-*   **2.1. Implementation Steps:**
-    *   In `app.py`, create the main title and instructional text.
-    *   Use `st.text_area` for the job description input.
-    *   Create an initial "Process Job Listing" button.
-    *   **Implement the "Edit and Confirm" workflow:**
-        1.  After the initial button press, the extraction logic is called.
-        2.  The results are displayed in editable `st.text_input` fields for `job_title`, `company`, `location`, etc.
-        3.  A "Confirm and Save" button is displayed, which triggers the deduplication and database insertion logic.
-*   **2.2. Definition of Done:**
-    *   The UI renders correctly.
-    *   A user can paste text, click a button, and see the extracted (but not yet saved) data in editable fields.
-    *   The "Confirm and Save" button is present but not yet functional.
-*   **2.3. Potential Risks:**
-    *   **Risk:** Streamlit's state management can be tricky. A page refresh might clear the extracted data before the user can confirm it.
-    *   **Mitigation:** Use Streamlit's `st.session_state` to hold the extracted data between button clicks.
+This task focuses on creating the user-facing part of your application. The key challenge here is not just displaying widgets, but managing the application's *state* as the user moves from inputting data to verifying it. We will use Streamlit's `st.session_state` to create a robust and intuitive multi-step workflow within a single page.
+
+---
+
+### **Task 2: Streamlit UI and User Workflow — Step-by-Step Implementation**
+
+**Objective:** To build a user interface that guides the user through pasting job text, processing it, and then verifying the extracted information before final submission.
+
+---
+
+#### **Step 2.1: Initialize the Streamlit App and Session State (app.py)**
+
+*   **Goal:** To set up the basic structure of `app.py` and initialize the `session_state`, which will act as the application's short-term memory. This is the most critical step for building a multi-step workflow.
+
+*   **Instructions & Pseudocode:**
+    1.  At the very top of your `app.py`, import Streamlit.
+    2.  Immediately after, add a block to initialize `st.session_state`. We will create a key, for instance `processed_data`, and set it to `None`. This ensures that the first time the script runs, this variable exists. Streamlit re-runs the entire script on every user interaction, so this check prevents our stored data from being erased.
+
+    ```python
+    # In app.py
+    import streamlit as st
+
+    # --- 1. SESSION STATE INITIALIZATION ---
+    # This must be at the top of the script. It creates a dictionary-like object
+    # that persists across script reruns for a single user session.
+
+    # 'processed_data' will hold the dictionary of extracted job details after Step 1.
+    # 'form_submitted' can be a flag to help control UI flow.
+    if 'processed_data' not in st.session_state:
+        st.session_state.processed_data = None
+
+    # This is a placeholder for the actual extraction logic you'll build in Task 3.
+    # It helps us build the UI without needing the backend to be complete.
+    def placeholder_extraction_function(raw_text):
+        # In the real implementation, this will call Regex, spaCy, etc.
+        # For now, it just returns a hardcoded dictionary for testing the UI.
+        return {
+            'job_title': "Data Scientist (Placeholder)",
+            'company': "FutureTech Inc. (Placeholder)",
+            'location': "Remote (Placeholder)",
+            'apply_url': "https://example.com/apply (Placeholder)",
+            'description': raw_text[:200] + "..." # Truncated description
+        }
+    ```
+
+---
+
+#### **Step 2.2: Build the Initial UI for Data Input**
+
+*   **Goal:** To create the first part of the user experience: a clear title, instructions, a large text box for input, and the initial processing button.
+
+*   **Instructions & Pseudocode:**
+    1.  Use `st.title()` and `st.markdown()` or `st.write()` to set up the page header and provide guidance to the user.
+    2.  Use `st.text_area()` to create the input box. Give it a descriptive label and help text.
+    3.  Use `st.button()` to create the "Process Job Listing" button.
+
+    ```python
+    # --- 2. UI - STEP 1: DATA INPUT ---
+    # This section is always visible to the user.
+
+    st.title("AI-Powered Resume Optimizer")
+    st.markdown("### Phase 1: Job Ingestion")
+    st.info("Paste the full, unformatted text of a job listing below and click 'Process' to begin.")
+
+    # Create the text area for user input
+    job_listing_text = st.text_area("Paste Job Listing Text Here", height=300, key="job_text_input")
+
+    # Create the initial button that triggers the extraction process
+    process_button = st.button("Process Job Listing")
+    ```
+
+---
+
+#### **Step 2.3: Handle the "Process" Button Click and State Update**
+
+*   **Goal:** To define what happens when the user clicks the "Process" button. The core logic is to call our (currently placeholder) extraction function and, crucially, save its output to `st.session_state.processed_data`.
+
+*   **Instructions & Pseudocode:**
+    1.  Create an `if` block that checks if the `process_button` was clicked.
+    2.  Inside the `if` block, add a check to ensure the user has actually entered some text.
+    3.  Use `st.spinner()` to provide feedback to the user that something is happening in the background.
+    4.  Call the `placeholder_extraction_function()` and assign its return value to `st.session_state.processed_data`.
+
+    ```python
+    # --- 3. LOGIC: HANDLE INITIAL PROCESSING ---
+    # This block executes only when the 'Process' button is clicked.
+
+    if process_button and job_listing_text:
+        # Provide visual feedback during processing
+        with st.spinner("Analyzing job description..."):
+            # Call the (placeholder) function to extract information
+            extracted_info = placeholder_extraction_function(job_listing_text)
+
+        # IMPORTANT: Store the extracted dictionary in the session state.
+        # This makes the data available for the next step in the workflow,
+        # even after Streamlit re-runs the script.
+        st.session_state.processed_data = extracted_info
+
+        # Optional: Force a script rerun to immediately display the confirmation form.
+        # st.experimental_rerun() is now st.rerun() in newer versions.
+        st.rerun()
+    ```
+
+---
+
+#### **Step 2.4: Implement the Conditional "Edit and Confirm" Form**
+
+*   **Goal:** To display the second part of the workflow *only if* data has been processed and stored in the session state. We will use an `st.form` to group the editable fields and the final submission button together.
+
+*   **Instructions & Pseudocode:**
+    1.  Create a main `if` block that checks if `st.session_state.processed_data` is not `None`. The entire form will live inside this block.
+    2.  Inside, use `st.form()` to create the form object.
+    3.  Within the `with st.form(...)` block, create a series of `st.text_input` and `st.text_area` widgets.
+    4.  Crucially, set the `value` of each widget to the corresponding data from `st.session_state.processed_data`. This pre-fills the form with the extracted information.
+    5.  At the end of the form block, create the final submission button using `st.form_submit_button()`.
+
+    ```python
+    # --- 4. UI - STEP 2: VERIFICATION FORM ---
+    # This entire section is conditional. It will only appear on screen
+    # if `st.session_state.processed_data` contains data.
+
+    if st.session_state.processed_data:
+        st.header("Step 2: Verify Extracted Information")
+        st.warning("Please review and correct any extracted details below before saving.")
+
+        # `st.form` groups multiple widgets. Their values are sent only when
+        # the `st.form_submit_button` inside the form is clicked.
+        with st.form(key="confirmation_form"):
+            data = st.session_state.processed_data
+
+            # Create editable fields, pre-filled with the extracted data
+            edited_title = st.text_input("Job Title", value=data.get('job_title'))
+            edited_company = st.text_input("Company", value=data.get('company'))
+            edited_location = st.text_input("Location", value=data.get('location'))
+            edited_url = st.text_input("Apply URL", value=data.get('apply_url'))
+            
+            # The final submission button for the form
+            confirm_button = st.form_submit_button("Confirm and Save to Database")
+
+            # --- 5. LOGIC: HANDLE FINAL SUBMISSION ---
+            if confirm_button:
+                # In Tasks 3 & 4, this is where you'll call the real deduplication
+                # and database insertion functions using the 'edited_' variables.
+                
+                # For now, just show a success message as a placeholder.
+                st.success("Confirmed! (This will save to the DB in a future step).")
+
+                # CRITICAL: Reset the session state to None to hide the form
+                # and return the app to its initial state for the next job listing.
+                st.session_state.processed_data = None
+                
+                # Clear the initial text area as well for a clean slate.
+                st.session_state.job_text_input = ""
+                st.rerun() # Rerun the script to reflect the changes immediately.
+    ```
+
+---
+
+### **Verification and Definition of Done for Task 2**
+
+Task 2 is complete when:
+
+1.  The app loads showing only the title, instructions, and the main text area/button.
+2.  Pasting text and clicking "Process Job Listing" makes the "Verify Extracted Information" form appear below.
+3.  The form fields are correctly pre-populated with the (placeholder) extracted data.
+4.  The user can edit the text within these fields.
+5.  Clicking "Confirm and Save to Database" displays a success message, and then the entire form disappears, returning the app to its initial clean state, ready for the next job listing.
 
 ---
 
