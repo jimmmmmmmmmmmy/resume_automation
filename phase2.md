@@ -563,12 +563,10 @@ resume_optimizer/
 
 ---
 
-### **Notes for Implementation Partner**
+### **Notes **
 
 1. **Start with Tasks 1-2** (Resume parsing) as they have no external API dependencies
 2. **Task 4.4 (LLM integration) is optional** - the rule-based fallback in 4.5 should work standalone
 3. **Database migrations (Task 3)** should be run before testing Task 5 UI
 4. **Test incrementally** - don't wait until the end to test
 5. **The `source_url` field change from Phase 1** - make sure your database is updated before starting
-
-Good luck!
