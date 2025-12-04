@@ -323,6 +323,184 @@ def hash_file(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
 
+# --- DIALOG FUNCTIONS FOR VIEWING FULL DETAILS ---
+@st.dialog("Job Listing Details", width="large")
+def view_job_dialog(job_id: int):
+    """Display full job listing details in a modal dialog."""
+    job = db_utils.get_job_listing_by_id(job_id)
+    if not job:
+        st.error("Job listing not found.")
+        return
+
+    st.markdown(f"## {job.get('job_title', 'Unknown Position')}")
+    st.markdown(f"**Company:** {job.get('company', 'N/A')}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Location:** {job.get('location', 'N/A')}")
+    with col2:
+        st.markdown(f"**Added:** {job.get('created_at', 'N/A')}")
+
+    if job.get('apply_url'):
+        st.markdown(f"[Apply Here]({job['apply_url']})")
+
+    if job.get('source_url'):
+        st.markdown(f"**Source:** [{job['source_url'][:50]}...]({job['source_url']})")
+
+    st.divider()
+    st.markdown("### Job Description")
+    description = job.get('description', 'No description available.')
+    # Use a scrollable text area that respects Streamlit theming
+    st.text_area(
+        label="Job Description",
+        value=description,
+        height=400,
+        disabled=True,
+        label_visibility="collapsed"
+    )
+
+    # Show metadata if available
+    if job.get('metadata'):
+        with st.expander("Extraction Metadata"):
+            st.json(job['metadata'])
+
+    if st.button("Close", type="primary"):
+        st.rerun()
+
+
+@st.dialog("Resume Details", width="large")
+def view_resume_dialog(resume_id: int):
+    """Display full resume details in a modal dialog."""
+    resume = db_utils.get_resume_by_id(resume_id)
+    if not resume:
+        st.error("Resume not found.")
+        return
+
+    st.markdown(f"## {resume.get('full_name', 'Unknown')}")
+
+    # Contact Information
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Email:** {resume.get('email', 'N/A')}")
+        st.markdown(f"**Phone:** {resume.get('phone', 'N/A')}")
+    with col2:
+        st.markdown(f"**Location:** {resume.get('location', 'N/A')}")
+        st.markdown(f"**Added:** {resume.get('created_at', 'N/A')}")
+
+    # Summary
+    if resume.get('summary'):
+        st.divider()
+        st.markdown("### Summary")
+        st.write(resume['summary'])
+
+    # Skills
+    skills = resume.get('skills', [])
+    if skills:
+        st.divider()
+        st.markdown(f"### Skills ({len(skills)})")
+        skills_html = " ".join([
+            f'<span style="background-color: #e1e1e1 !important; padding: 4px 10px; margin: 3px; '
+            f'border-radius: 15px; display: inline-block; font-size: 13px; color: #1a1a1a !important;">{skill}</span>'
+            for skill in skills
+        ])
+        st.markdown(skills_html, unsafe_allow_html=True)
+
+    # Experience
+    experience = resume.get('experience', [])
+    if experience:
+        st.divider()
+        st.markdown(f"### Experience ({len(experience)})")
+        for exp in experience:
+            st.markdown(f"**{exp.get('title', 'Position')}** at {exp.get('company', 'Company')}")
+            if exp.get('dates'):
+                st.caption(exp['dates'])
+            if exp.get('description'):
+                for bullet in exp['description']:
+                    st.markdown(f"- {bullet}")
+            st.markdown("")
+
+    # Education
+    education = resume.get('education', [])
+    if education:
+        st.divider()
+        st.markdown(f"### Education ({len(education)})")
+        for edu in education:
+            st.markdown(f"**{edu.get('degree', 'Degree')}** - {edu.get('institution', 'Institution')}")
+            details = []
+            if edu.get('field'):
+                details.append(edu['field'])
+            if edu.get('dates'):
+                details.append(edu['dates'])
+            if edu.get('gpa'):
+                details.append(f"GPA: {edu['gpa']}")
+            if details:
+                st.caption(" | ".join(details))
+
+    # Projects
+    projects = resume.get('projects', [])
+    if projects:
+        st.divider()
+        st.markdown(f"### Projects ({len(projects)})")
+        for proj in projects:
+            st.markdown(f"**{proj.get('name', 'Project')}**")
+            if proj.get('url'):
+                st.markdown(f"[View Project]({proj['url']})")
+            if proj.get('technologies'):
+                tech_html = " ".join([
+                    f'<span style="background-color: #d4edda !important; padding: 2px 6px; '
+                    f'border-radius: 8px; font-size: 12px; color: #155724 !important;">{t}</span>'
+                    for t in proj['technologies']
+                ])
+                st.markdown(tech_html, unsafe_allow_html=True)
+            if proj.get('description'):
+                for bullet in proj['description']:
+                    st.markdown(f"- {bullet}")
+            st.markdown("")
+
+    if st.button("Close", type="primary"):
+        st.rerun()
+
+
+@st.dialog("Confirm Delete")
+def confirm_delete_job_dialog(job_id: int, job_title: str, company: str):
+    """Confirmation dialog for deleting a job listing."""
+    st.markdown(f"Are you sure you want to delete this job listing?")
+    st.markdown(f"**{job_title}** at **{company}**")
+    st.warning("This action cannot be undone.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, Delete", type="primary", key="confirm_del_job"):
+            if db_utils.delete_job_listing(job_id):
+                st.session_state.delete_success = "Job listing deleted successfully!"
+                st.rerun()
+            else:
+                st.error("Failed to delete job listing.")
+    with col2:
+        if st.button("Cancel", key="cancel_del_job"):
+            st.rerun()
+
+
+@st.dialog("Confirm Delete")
+def confirm_delete_resume_dialog(resume_id: int, name: str):
+    """Confirmation dialog for deleting a resume."""
+    st.markdown(f"Are you sure you want to delete this resume?")
+    st.markdown(f"**{name}**")
+    st.warning("This action cannot be undone.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, Delete", type="primary", key="confirm_del_res"):
+            if db_utils.delete_resume(resume_id):
+                st.session_state.delete_success = "Resume deleted successfully!"
+                st.rerun()
+            else:
+                st.error("Failed to delete resume.")
+    with col2:
+        if st.button("Cancel", key="cancel_del_res"):
+            st.rerun()
+
+
 # --- UI - HEADER ---
 st.title("AI-Powered Resume Optimizer")
 
@@ -535,22 +713,6 @@ with tab1:
                         st.session_state.scrape_error = f"Unexpected error: {e}"
                         st.rerun()
 
-        # Help text
-        with st.expander("Supported Job Sites"):
-            st.markdown("""
-            This scraper works best with:
-            - **LinkedIn Jobs** - linkedin.com/jobs
-            - **Greenhouse** - boards.greenhouse.io
-            - **Lever** - jobs.lever.co
-            - **Workday** - myworkdayjobs.com
-            - **iCIMS** - Various company career sites
-            - **Most company career pages** with standard job postings
-
-            The scraper uses multiple extraction strategies:
-            1. **JSON-LD Schema** - Most reliable, used by modern job sites
-            2. **CSS Selectors** - Fallback for common HTML patterns
-            3. **LLM Extraction** - AI-powered extraction for complete descriptions
-            """)
 
 
 # =============================================================================
@@ -749,17 +911,26 @@ with tab3:
 
         with col_jobs:
             st.subheader("Saved Job Listings")
+            # Show delete success message if set
+            if st.session_state.get('delete_success'):
+                st.success(st.session_state.delete_success)
+                st.session_state.delete_success = None
             try:
                 jobs = db_utils.get_all_job_listings(limit=20)
                 if jobs:
                     for job in jobs:
-                        with st.expander(f"{job.get('job_title', 'Unknown')} - {job.get('company', 'Unknown')}"):
+                        job_title = job.get('job_title', 'Unknown')
+                        company = job.get('company', 'Unknown')
+                        with st.expander(f"{job_title} - {company}"):
                             st.write(f"**Location:** {job.get('location', 'N/A')}")
                             st.write(f"**Added:** {job.get('created_at', 'N/A')}")
-                            if st.button(f"Delete", key=f"del_job_{job['id']}"):
-                                if db_utils.delete_job_listing(job['id']):
-                                    st.success("Deleted!")
-                                    st.rerun()
+                            btn_col1, btn_col2 = st.columns(2)
+                            with btn_col1:
+                                if st.button("View", key=f"view_job_{job['id']}", type="primary"):
+                                    view_job_dialog(job['id'])
+                            with btn_col2:
+                                if st.button("Delete", key=f"del_job_{job['id']}"):
+                                    confirm_delete_job_dialog(job['id'], job_title, company)
                 else:
                     st.info("No saved job listings.")
             except Exception as e:
@@ -778,10 +949,13 @@ with tab3:
                             if skills:
                                 st.write(f"**Skills:** {', '.join(skills[:5])}...")
                             st.write(f"**Added:** {res.get('created_at', 'N/A')}")
-                            if st.button(f"Delete", key=f"del_res_{res['id']}"):
-                                if db_utils.delete_resume(res['id']):
-                                    st.success("Deleted!")
-                                    st.rerun()
+                            btn_col1, btn_col2 = st.columns(2)
+                            with btn_col1:
+                                if st.button("View", key=f"view_res_{res['id']}", type="primary"):
+                                    view_resume_dialog(res['id'])
+                            with btn_col2:
+                                if st.button("Delete", key=f"del_res_{res['id']}"):
+                                    confirm_delete_resume_dialog(res['id'], name)
                 else:
                     st.info("No saved resumes.")
             except Exception as e:
