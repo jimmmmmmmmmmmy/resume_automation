@@ -209,3 +209,6 @@ __marimo__/
 # Project-specific
 test_resumes/
 phase*.md
+html_scrape/
+*.html
+test_*.py

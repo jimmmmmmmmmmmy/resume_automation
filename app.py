@@ -3,9 +3,10 @@ AI-Powered Resume Optimizer - Streamlit Application
 
 Phase 1: Job Ingestion and Processing Pipeline
 Phase 2: Resume Analysis and AI-Powered Optimization
+Phase 3: Automated Web Scraping with Playwright
 
 This application allows users to:
-1. Paste job listing text and extract key information
+1. Scrape job postings from URLs using Playwright
 2. Upload resumes and parse structured data
 3. Compare resumes against job listings
 4. Get actionable optimization suggestions
@@ -16,10 +17,17 @@ import os
 import streamlit as st
 
 from models import JobListing, Resume
-from processing import extract_job_details, hash_description, clean_job_text
+from processing import hash_description
 from resume_parser import parse_resume, extract_resume_details
 import db_utils
 from llm_verify import auto_correct_resume
+from job_scraper import (
+    scrape_job_url,
+    ScrapingError,
+    PageLoadError,
+    BlockedError,
+    ExtractionError,
+)
 
 
 # --- Helper Functions for Shell Commands ---
@@ -305,6 +313,9 @@ if 'setup_step' not in st.session_state:
     st.session_state.setup_step = 1
 if 'setup_complete' not in st.session_state:
     st.session_state.setup_complete = False
+# Scraper state
+if 'scrape_error' not in st.session_state:
+    st.session_state.scrape_error = None
 
 
 def hash_file(file_bytes: bytes) -> str:
@@ -330,14 +341,6 @@ with tab1:
         st.success("Job listing saved successfully!")
         st.session_state.show_success = False
 
-    # Source URL input
-    source_url = st.text_input(
-        "Source Link *",
-        placeholder="https://linkedin.com/jobs/view/...",
-        help="Paste the URL where you found this job listing",
-        key="job_source_url"
-    )
-
     # Show the verification form if we have processed data
     if st.session_state.processed_data:
         st.header("Step 2: Verify Extracted Information")
@@ -346,19 +349,78 @@ with tab1:
         data = st.session_state.processed_data
 
         # Display extraction metadata
-        if data.metadata and 'extraction_methods' in data.metadata:
-            methods = data.metadata['extraction_methods']
-            regex_fields = methods.get('regex', [])
-            spacy_fields = methods.get('spacy', [])
-
+        if data.metadata:
             with st.expander("Extraction Details"):
-                if regex_fields:
-                    st.write(f"**Regex extracted:** {', '.join(regex_fields)}")
-                if spacy_fields:
-                    st.write(f"**NLP (spaCy) extracted:** {', '.join(spacy_fields)}")
+                # Scrape source info
+                if data.metadata.get('scrape_source'):
+                    source_map = {
+                        'json_ld': 'JSON-LD Schema (most reliable)',
+                        'css_selectors': 'CSS Selectors',
+                        'llm': 'LLM Extraction'
+                    }
+                    source = data.metadata.get('scrape_source')
+                    st.write(f"**Primary Source:** {source_map.get(source, source)}")
+
+                if data.metadata.get('ats_platform'):
+                    st.write(f"**ATS Platform:** {data.metadata['ats_platform']}")
+
+                if data.metadata.get('llm_extraction'):
+                    st.write("**LLM Enhancement:** Yes (two-pass extraction)")
+
+                # Legacy regex/spacy info
+                methods = data.metadata.get('extraction_methods', {})
+                if methods.get('json_ld'):
+                    st.write(f"**JSON-LD fields:** {', '.join(methods['json_ld'])}")
+                if methods.get('css'):
+                    st.write(f"**CSS extracted:** {', '.join(methods['css'])}")
+                if methods.get('regex'):
+                    st.write(f"**Regex extracted:** {', '.join(methods['regex'])}")
+                if methods.get('spacy'):
+                    st.write(f"**NLP (spaCy) extracted:** {', '.join(methods['spacy'])}")
+
+        # Show description sections OUTSIDE the form (before editable fields)
+        st.markdown("---")
+        st.markdown("#### Job Description")
+
+        llm_sections = data.metadata.get('llm_raw', {}).get('description_sections', []) if data.metadata else []
+
+        if llm_sections:
+            # Display each section with its header and bullet points
+            for section in llm_sections:
+                header = section.get('header', 'Description')
+                content = section.get('content', [])
+
+                with st.expander(f"**{header}**", expanded=True):
+                    if isinstance(content, list):
+                        for item in content:
+                            if item and item.strip():
+                                st.markdown(f"- {item}")
+                    elif content:
+                        st.markdown(content)
+        else:
+            # Fallback: show full description text in expander
+            with st.expander("Full Description", expanded=True):
+                # Show in a scrollable container
+                st.markdown(
+                    f'<div style="max-height: 400px; overflow-y: auto; padding: 10px; background-color: #f0f2f6; border-radius: 5px;">'
+                    f'<pre style="white-space: pre-wrap; word-wrap: break-word;">{data.description}</pre>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+        st.markdown("---")
 
         # Form for editing extracted data
         with st.form(key="confirmation_form"):
+            st.markdown("#### Edit Extracted Fields")
+
+            # Source URL (pre-filled from scrape)
+            edited_source_url = st.text_input(
+                "Source URL *",
+                value=data.source_url or "",
+                help="The URL where this job was found"
+            )
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -385,14 +447,6 @@ with tab1:
                     help="Link to the application"
                 )
 
-            # Show truncated description
-            st.text_area(
-                "Description Preview",
-                value=data.description[:500] + "..." if len(data.description) > 500 else data.description,
-                height=150,
-                disabled=True
-            )
-
             # Form buttons
             col1, col2, col3 = st.columns([1, 1, 2])
 
@@ -403,8 +457,8 @@ with tab1:
 
         # Handle form submission
         if confirm_button:
-            if not source_url or not source_url.strip():
-                st.error("Source Link is required.")
+            if not edited_source_url or not edited_source_url.strip():
+                st.error("Source URL is required.")
                 st.stop()
 
             final_job_data = JobListing(
@@ -413,7 +467,7 @@ with tab1:
                 location=edited_location or None,
                 apply_url=edited_url or None,
                 description=st.session_state.original_description,
-                source_url=source_url,
+                source_url=edited_source_url.strip(),
                 metadata=data.metadata
             )
 
@@ -438,26 +492,65 @@ with tab1:
             st.rerun()
 
     else:
-        # Data input form
-        st.info("Paste the full text of a job listing below and click 'Process' to begin.")
+        # URL input form
+        st.info("Enter a job posting URL below and click 'Scrape' to extract job details automatically.")
 
-        job_listing_text = st.text_area(
-            "Paste Job Listing Text Here",
-            height=300,
-            placeholder="Copy and paste the complete job listing text here...",
-            key="job_text_input"
+        # Show any previous scrape error
+        if st.session_state.scrape_error:
+            st.error(st.session_state.scrape_error)
+            st.session_state.scrape_error = None
+
+        job_url = st.text_input(
+            "Job Posting URL",
+            placeholder="https://jobs.example.com/position/12345",
+            help="Paste the full URL of the job posting you want to analyze",
+            key="job_url_input"
         )
 
-        if st.button("Process Job Listing", type="primary"):
-            if not job_listing_text or len(job_listing_text.strip()) < 50:
-                st.error("Please paste a job listing with at least 50 characters.")
+        if st.button("Scrape Job Posting", type="primary"):
+            if not job_url or not job_url.strip():
+                st.error("Please enter a job posting URL.")
+            elif not job_url.startswith(('http://', 'https://')):
+                st.error("URL must start with http:// or https://")
             else:
-                with st.spinner("Analyzing job description..."):
-                    cleaned_text = clean_job_text(job_listing_text)
-                    extracted_info = extract_job_details(cleaned_text)
-                    st.session_state.processed_data = extracted_info
-                    st.session_state.original_description = job_listing_text
-                st.rerun()
+                with st.spinner("Scraping job posting... This may take a few seconds."):
+                    try:
+                        job_listing = scrape_job_url(job_url.strip())
+                        st.session_state.processed_data = job_listing
+                        st.session_state.original_description = job_listing.description
+                        st.rerun()
+                    except PageLoadError as e:
+                        st.session_state.scrape_error = f"Could not load page: {e}"
+                        st.rerun()
+                    except BlockedError as e:
+                        st.session_state.scrape_error = f"Site blocked access: {e}. Try again later."
+                        st.rerun()
+                    except ExtractionError as e:
+                        st.session_state.scrape_error = f"Could not extract job details: {e}"
+                        st.rerun()
+                    except ValueError as e:
+                        st.session_state.scrape_error = str(e)
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state.scrape_error = f"Unexpected error: {e}"
+                        st.rerun()
+
+        # Help text
+        with st.expander("Supported Job Sites"):
+            st.markdown("""
+            This scraper works best with:
+            - **LinkedIn Jobs** - linkedin.com/jobs
+            - **Greenhouse** - boards.greenhouse.io
+            - **Lever** - jobs.lever.co
+            - **Workday** - myworkdayjobs.com
+            - **iCIMS** - Various company career sites
+            - **Most company career pages** with standard job postings
+
+            The scraper uses multiple extraction strategies:
+            1. **JSON-LD Schema** - Most reliable, used by modern job sites
+            2. **CSS Selectors** - Fallback for common HTML patterns
+            3. **LLM Extraction** - AI-powered extraction for complete descriptions
+            """)
 
 
 # =============================================================================
@@ -917,4 +1010,4 @@ with st.sidebar:
 
 # --- FOOTER ---
 st.divider()
-st.caption("Resume Optimizer v0.2 | Phase 2: Resume Analysis")
+st.caption("Resume Optimizer v0.3 | Phase 3: Web Scraping")
