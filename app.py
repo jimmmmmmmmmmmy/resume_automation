@@ -29,6 +29,13 @@ from job_scraper import (
     ExtractionError,
 )
 
+# Phase 3: Resume-Job Matching & Optimization
+import matcher
+import optimizer
+import resume_renderer
+from analysis import extract_skills_from_job, compare_skills, identify_missing_keywords
+from models import Resume, JobListing
+
 
 # --- Helper Functions for Shell Commands ---
 def run_command(command: list[str], timeout: int = 10) -> tuple[bool, str]:
@@ -317,10 +324,129 @@ if 'setup_complete' not in st.session_state:
 if 'scrape_error' not in st.session_state:
     st.session_state.scrape_error = None
 
+# Phase 3: Apply tab state
+if 'apply_state' not in st.session_state:
+    st.session_state.apply_state = {
+        'match_results': None,      # List of MatchResult
+        'selected_resume_idx': 0,   # Which resume from results
+        'selected_job_id': None,
+        'optimizing_section': None,
+        'rewrite_result': None,
+        'editing_text': None,
+        'pdf_bytes': None,
+        'working_resume': None,     # Working copy of resume being edited
+        'working_resume_id': None,  # ID of the resume being edited
+        'has_unsaved_changes': False,  # Track if there are pending changes
+        'current_match': None,      # Current match result for display
+    }
+
 
 def hash_file(file_bytes: bytes) -> str:
     """Generate SHA-256 hash of file bytes."""
     return hashlib.sha256(file_bytes).hexdigest()
+
+
+def _apply_rewrite_to_working_copy(section, new_content: str) -> bool:
+    """
+    Apply a rewrite to the working copy in session state.
+
+    Returns True if successful, False otherwise.
+    """
+    apply_state = st.session_state.apply_state
+    working_resume = apply_state.get('working_resume')
+
+    if not working_resume:
+        return False
+
+    try:
+        if section.section_type == 'experience':
+            idx = section.section_index
+            experience = working_resume.get('experience', []) or []
+            # Bounds check
+            if idx >= len(experience):
+                return False
+            bullets = [line.strip().lstrip('- ').lstrip('* ')
+                       for line in new_content.strip().split('\n')
+                       if line.strip()]
+            experience[idx]['description'] = bullets
+            working_resume['experience'] = experience
+
+        elif section.section_type == 'project':
+            idx = section.section_index
+            projects = working_resume.get('projects', []) or []
+            # Bounds check
+            if idx >= len(projects):
+                return False
+            bullets = [line.strip().lstrip('- ').lstrip('* ')
+                       for line in new_content.strip().split('\n')
+                       if line.strip()]
+            projects[idx]['description'] = bullets
+            working_resume['projects'] = projects
+
+        elif section.section_type == 'summary':
+            working_resume['summary'] = new_content.strip()
+
+        else:
+            return False
+
+        # Mark as having unsaved changes
+        apply_state['has_unsaved_changes'] = True
+        return True
+
+    except Exception as e:
+        print(f"Error applying rewrite: {e}")
+        return False
+
+
+def _save_working_resume_to_db() -> bool:
+    """
+    Save the working resume copy back to the database.
+
+    Returns True if successful, False otherwise.
+    """
+    apply_state = st.session_state.apply_state
+    working_resume = apply_state.get('working_resume')
+    resume_id = apply_state.get('working_resume_id')
+
+    if not working_resume or not resume_id:
+        return False
+
+    try:
+        # Update the resume sections in database
+        update_data = {}
+        if 'summary' in working_resume:
+            update_data['summary'] = working_resume['summary']
+        if 'experience' in working_resume:
+            update_data['experience'] = working_resume['experience']
+        if 'projects' in working_resume:
+            update_data['projects'] = working_resume['projects']
+
+        success = db_utils.update_resume_sections(resume_id, update_data)
+
+        if success:
+            # Re-generate embeddings
+            db_utils.store_resume_embeddings(resume_id, working_resume)
+            apply_state['has_unsaved_changes'] = False
+
+        return success
+    except Exception as e:
+        print(f"Error saving resume to database: {e}")
+        return False
+
+
+def _rescore_working_resume(job_embedding, threshold: float):
+    """
+    Re-score the working resume against the job.
+
+    Returns updated MatchResult.
+    """
+    apply_state = st.session_state.apply_state
+    working_resume = apply_state.get('working_resume')
+
+    if not working_resume:
+        return None
+
+    return matcher.score_resume_sections(working_resume, job_embedding, threshold)
 
 
 # --- DIALOG FUNCTIONS FOR VIEWING FULL DETAILS ---
@@ -505,7 +631,7 @@ def confirm_delete_resume_dialog(resume_id: int, name: str):
 st.title("AI-Powered Resume Optimizer")
 
 # --- NAVIGATION ---
-tab1, tab2, tab3 = st.tabs(["Job Ingestion", "Resume Analysis", "History"])
+tab1, tab2, tab3, tab4 = st.tabs(["Job Ingestion", "Resume Analysis", "History", "Apply"])
 
 
 # =============================================================================
@@ -962,6 +1088,395 @@ with tab3:
                 st.error(f"Error loading resumes: {e}")
 
 
+# =============================================================================
+# TAB 4: APPLY (Phase 3)
+# =============================================================================
+with tab4:
+    st.markdown("### Apply: Resume Optimization")
+
+    apply_state = st.session_state.apply_state
+
+    # Check if database is ready
+    try:
+        apply_tables_ready = db_utils.tables_ready()
+    except Exception:
+        apply_tables_ready = False
+
+    if not apply_tables_ready:
+        st.warning("Database tables not set up yet. Use the Database Setup in the sidebar.")
+        st.stop()
+
+    # Show unsaved changes warning
+    if apply_state.get('has_unsaved_changes'):
+        st.warning("You have unsaved changes. Click 'Save All Changes' to persist them to the database.")
+
+    # Step 1: Select a job to apply for
+    jobs = db_utils.get_all_job_listings(limit=50)
+    if not jobs:
+        st.info("No saved jobs. Ingest a job listing first in the Job Ingestion tab.")
+        st.stop()
+
+    job_options = {f"{j['job_title']} - {j['company']}": j['id'] for j in jobs}
+    selected_job_name = st.selectbox("Select Job to Apply For", options=list(job_options.keys()))
+    selected_job_id = job_options[selected_job_name]
+
+    # Threshold configuration with explanation
+    col_thresh, col_help = st.columns([2, 3])
+    with col_thresh:
+        threshold = st.slider(
+            "Match Threshold",
+            min_value=0.30,
+            max_value=0.70,
+            value=0.50,
+            step=0.05,
+        )
+    with col_help:
+        st.caption(
+            "**Score Guide:**\n"
+            "- 75%+ = Strong match\n"
+            "- 65-74% = Good, minor tweaks\n"
+            "- 50-64% = Moderate, optimize recommended\n"
+            "- Below 50% = Weak, needs work"
+        )
+
+    # Step 2: Find matching resumes
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("Find Best Resume Matches", type="primary"):
+            with st.spinner("Analyzing resumes..."):
+                try:
+                    results = matcher.find_top_matching_resumes(
+                        selected_job_id,
+                        limit=5,
+                        threshold=threshold
+                    )
+                    if results:
+                        apply_state['match_results'] = results
+                        apply_state['selected_resume_idx'] = 0
+                        apply_state['selected_job_id'] = selected_job_id
+                        apply_state['optimizing_section'] = None
+                        apply_state['rewrite_result'] = None
+                        apply_state['pdf_bytes'] = None
+                        # Initialize working copy from first result
+                        first_match = results[0]
+                        full_resume = db_utils.get_resume_by_id(first_match.resume_id)
+                        if full_resume:
+                            apply_state['working_resume'] = dict(full_resume)
+                            apply_state['working_resume_id'] = first_match.resume_id
+                            apply_state['has_unsaved_changes'] = False
+                            apply_state['current_match'] = first_match
+                    else:
+                        st.warning("No resumes found. Upload a resume first in the Resume Analysis tab.")
+                except Exception as e:
+                    st.error(f"Error matching resumes: {e}")
+
+    with col_btn2:
+        if st.button("Clear Results"):
+            apply_state['match_results'] = None
+            apply_state['optimizing_section'] = None
+            apply_state['rewrite_result'] = None
+            apply_state['working_resume'] = None
+            apply_state['working_resume_id'] = None
+            apply_state['has_unsaved_changes'] = False
+            apply_state['current_match'] = None
+            st.rerun()
+
+    # Display results
+    if apply_state['match_results'] and apply_state.get('working_resume'):
+        results = apply_state['match_results']
+        job = db_utils.get_job_listing_by_id(apply_state['selected_job_id'])
+
+        if not job:
+            st.error("Could not load job data.")
+            st.stop()
+
+        # Resume selector if multiple matches
+        if len(results) > 1:
+            resume_names = [f"{r.resume_name} ({r.overall_score:.0%})" for r in results]
+            selected_idx = st.selectbox(
+                "Select Resume",
+                range(len(results)),
+                format_func=lambda i: resume_names[i],
+                index=apply_state['selected_resume_idx']
+            )
+            if selected_idx != apply_state['selected_resume_idx']:
+                # Switch to different resume - load new working copy
+                apply_state['selected_resume_idx'] = selected_idx
+                apply_state['optimizing_section'] = None
+                apply_state['rewrite_result'] = None
+                new_match = results[selected_idx]
+                new_resume = db_utils.get_resume_by_id(new_match.resume_id)
+                if new_resume:
+                    apply_state['working_resume'] = dict(new_resume)
+                    apply_state['working_resume_id'] = new_match.resume_id
+                    apply_state['has_unsaved_changes'] = False
+                    apply_state['current_match'] = new_match
+                st.rerun()
+
+        # Use working resume for display
+        working_resume = apply_state['working_resume']
+        current_match = apply_state.get('current_match') or results[apply_state['selected_resume_idx']]
+
+        # Get job embedding for re-scoring
+        from embeddings import embed_text
+        job_embedding = embed_text(job['description'])
+
+        # Re-score working resume to get current scores
+        current_match = matcher.score_resume_sections(working_resume, job_embedding, threshold)
+        apply_state['current_match'] = current_match
+
+        # Pre-compute skill analysis for both columns
+        job_obj_for_score = JobListing.from_dict(job)
+        job_skills_for_score = extract_skills_from_job(job_obj_for_score)
+        resume_skills_for_score = working_resume.get('skills', []) or []
+        matching_for_score, missing_for_score = compare_skills(resume_skills_for_score, job_skills_for_score)
+        total_skills = len(matching_for_score) + len(missing_for_score)
+        keyword_score = len(matching_for_score) / total_skills if total_skills > 0 else 0.5
+        semantic_score = current_match.overall_score
+
+        st.divider()
+
+        # Display layout: Resume preview | Optimization panel
+        col1, col2 = st.columns([3, 2])
+
+        with col1:
+            st.markdown("#### Resume Preview")
+            status_text = " (unsaved changes)" if apply_state.get('has_unsaved_changes') else ""
+            st.caption(f"Showing: {working_resume.get('full_name', 'Resume')} (ID: {apply_state['working_resume_id']}){status_text}")
+
+            resume_html = resume_renderer.render_resume_html(
+                working_resume,
+                section_scores=current_match.score_dict(),
+                threshold=threshold,
+                matching_skills=matching_for_score
+            )
+            st.components.v1.html(resume_html, height=700, scrolling=True)
+
+        with col2:
+            st.markdown("#### Optimization Panel")
+
+            # Display both scores side by side
+            score_col1, score_col2 = st.columns(2)
+
+            with score_col1:
+                st.metric(
+                    label="Semantic Match",
+                    value=f"{semantic_score:.0%}",
+                    help="Measures how well your resume content aligns with the job description"
+                )
+
+            with score_col2:
+                st.metric(
+                    label="Skills Match",
+                    value=f"{keyword_score:.0%}",
+                    help="Percentage of required skills found in your resume (ATS compatibility)"
+                )
+
+            # Interpretation based on combined scores
+            if semantic_score >= 0.65 and keyword_score >= 0.65:
+                st.success("Strong match - well aligned with requirements")
+            elif semantic_score >= 0.50 and keyword_score >= 0.50:
+                st.info("Good match - some optimization possible")
+            elif semantic_score < 0.50 and keyword_score >= 0.60:
+                st.warning("Has skills but weak descriptions - optimize content")
+            elif semantic_score >= 0.50 and keyword_score < 0.50:
+                st.warning("Good content but missing keywords - add required skills")
+            else:
+                st.error("Needs work - significant gaps in skills and content")
+
+            # --- Skill Gap Analysis ---
+            st.divider()
+            st.markdown("#### Skill Gap Analysis")
+
+            # Reuse the already-computed skill data
+            matching_skills = matching_for_score
+            missing_skills = missing_for_score
+            job_obj = job_obj_for_score
+
+            # Skills match progress bar
+            if total_skills > 0:
+                st.progress(keyword_score, text=f"Skills Match: {len(matching_skills)}/{total_skills} ({keyword_score:.0%})")
+            else:
+                st.info("No specific skills detected in job description")
+
+            # Matching skills (green)
+            if matching_skills:
+                st.markdown("**Skills You Have:**")
+                skills_html = " ".join([
+                    f'<span style="background-color: #c8e6c9; color: #2e7d32; padding: 2px 8px; '
+                    f'border-radius: 12px; margin: 2px; display: inline-block; font-size: 12px;">{skill}</span>'
+                    for skill in matching_skills
+                ])
+                st.markdown(skills_html, unsafe_allow_html=True)
+
+            # Missing skills (red)
+            if missing_skills:
+                st.markdown("**Missing Required Skills:**")
+                missing_html = " ".join([
+                    f'<span style="background-color: #ffcdd2; color: #c62828; padding: 2px 8px; '
+                    f'border-radius: 12px; margin: 2px; display: inline-block; font-size: 12px;">{skill}</span>'
+                    for skill in missing_skills
+                ])
+                st.markdown(missing_html, unsafe_allow_html=True)
+
+            # Missing keywords (using Resume model for analysis function)
+            try:
+                resume_for_analysis = Resume.from_dict(working_resume)
+                missing_keywords = identify_missing_keywords(resume_for_analysis, job_obj, top_n=8)
+                if missing_keywords:
+                    st.markdown("**Missing Keywords:**")
+                    kw_html = " ".join([
+                        f'<span style="background-color: #ffe0b2; color: #e65100; padding: 2px 8px; '
+                        f'border-radius: 12px; margin: 2px; display: inline-block; font-size: 12px;">{kw}</span>'
+                        for kw in missing_keywords
+                    ])
+                    st.markdown(kw_html, unsafe_allow_html=True)
+            except Exception:
+                pass  # Skip keyword analysis if it fails
+
+            st.divider()
+
+            # Save All Changes button (prominent when there are changes)
+            if apply_state.get('has_unsaved_changes'):
+                if st.button("Save All Changes to Database", type="primary"):
+                    if _save_working_resume_to_db():
+                        st.success("Changes saved to database!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to save changes.")
+
+            # Weak sections list
+            st.markdown("**Sections to Improve:**")
+            if current_match.weak_sections:
+                for ws in current_match.weak_sections:
+                    section_name = ws.section_type.title()
+                    if ws.section_type in ('experience', 'project'):
+                        section_name += f" #{ws.section_index + 1}"
+
+                    if st.button(
+                        f"Optimize: {section_name} ({ws.score:.0%})",
+                        key=f"opt_{ws.section_type}_{ws.section_index}"
+                    ):
+                        apply_state['optimizing_section'] = ws
+                        apply_state['rewrite_result'] = None
+                        st.rerun()
+            else:
+                st.success("All sections score above threshold!")
+
+            # Optimization interface
+            if apply_state['optimizing_section']:
+                section = apply_state['optimizing_section']
+                st.divider()
+                st.markdown(f"**Optimizing: {section.section_type.title()}**")
+
+                # Show current content from working resume
+                with st.expander("Current Content", expanded=False):
+                    if section.section_type == 'experience':
+                        exp_list = working_resume.get('experience', []) or []
+                        if section.section_index < len(exp_list):
+                            content = exp_list[section.section_index]
+                            st.write(f"**{content.get('title', 'Unknown')}**")
+                            for bullet in content.get('description', []) or []:
+                                st.write(f"- {bullet}")
+                    elif section.section_type == 'project':
+                        proj_list = working_resume.get('projects', []) or []
+                        if section.section_index < len(proj_list):
+                            content = proj_list[section.section_index]
+                            st.write(f"**{content.get('name', 'Unknown')}**")
+                            for bullet in content.get('description', []) or []:
+                                st.write(f"- {bullet}")
+                    else:
+                        st.write(working_resume.get('summary', ''))
+
+                # Generate or show rewrite
+                if apply_state['rewrite_result'] is None:
+                    if st.button("Generate Suggestion", type="primary"):
+                        with st.spinner("Generating AI suggestion..."):
+                            try:
+                                # Use content from working resume
+                                if section.section_type == 'experience':
+                                    content = working_resume.get('experience', [])[section.section_index]
+                                elif section.section_type == 'project':
+                                    content = working_resume.get('projects', [])[section.section_index]
+                                else:
+                                    content = working_resume.get('summary', '')
+
+                                result = optimizer.generate_section_rewrite(
+                                    section.section_type,
+                                    content,
+                                    job['description']
+                                )
+                                apply_state['rewrite_result'] = result
+                                apply_state['editing_text'] = result
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error generating suggestion: {e}")
+                else:
+                    st.markdown("**Suggested Rewrite:**")
+
+                    # Editable text area
+                    edited_text = st.text_area(
+                        "Edit suggestion (or accept as-is):",
+                        value=apply_state['editing_text'],
+                        height=200,
+                        key="edit_textarea"
+                    )
+                    apply_state['editing_text'] = edited_text
+
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("Accept", type="primary"):
+                            success = _apply_rewrite_to_working_copy(section, edited_text)
+                            if success:
+                                st.success("Applied to working copy!")
+                                apply_state['rewrite_result'] = None
+                                apply_state['optimizing_section'] = None
+                                st.rerun()
+                            else:
+                                st.error("Failed to apply changes.")
+
+                    with col_b:
+                        if st.button("Regenerate"):
+                            apply_state['rewrite_result'] = None
+                            st.rerun()
+
+                    with col_c:
+                        if st.button("Cancel"):
+                            apply_state['optimizing_section'] = None
+                            apply_state['rewrite_result'] = None
+                            st.rerun()
+
+            # Export section
+            st.divider()
+            st.markdown("#### Export")
+
+            col_exp1, col_exp2 = st.columns(2)
+            with col_exp1:
+                if st.button("Generate PDF"):
+                    try:
+                        pdf_bytes = resume_renderer.render_resume_pdf_bytes(working_resume)
+                        apply_state['pdf_bytes'] = pdf_bytes
+                        st.success("PDF ready!")
+                    except ImportError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"PDF generation failed: {e}")
+
+                if apply_state.get('pdf_bytes'):
+                    company = job.get('company', 'Company').replace(' ', '_')
+                    st.download_button(
+                        "Download PDF",
+                        data=apply_state['pdf_bytes'],
+                        file_name=f"Resume_{company}.pdf",
+                        mime="application/pdf"
+                    )
+
+            with col_exp2:
+                if st.button("Copy Plain Text"):
+                    plain_text = resume_renderer.render_resume_plaintext(working_resume)
+                    st.code(plain_text, language=None)
+
+
 # --- SIDEBAR: Database Status ---
 with st.sidebar:
     st.header("Settings")
@@ -1184,4 +1699,4 @@ with st.sidebar:
 
 # --- FOOTER ---
 st.divider()
-st.caption("Resume Optimizer v0.3 | Phase 3: Web Scraping")
+st.caption("Resume Optimizer v0.4 | Phase 3: Resume-Job Matching & Optimization")

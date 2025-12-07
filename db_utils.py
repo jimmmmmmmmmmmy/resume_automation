@@ -612,3 +612,224 @@ def get_analysis_by_ids(resume_id: int, job_id: int) -> Optional[Dict[str, Any]]
     except Exception as e:
         print(f"Error fetching analysis result: {e}")
         return None
+
+
+# =============================================================================
+# Phase 3: Embedding and Optimization Functions
+# =============================================================================
+
+def update_resume_sections(resume_id: int, updated_data: Dict[str, Any]) -> bool:
+    """
+    Update resume sections (experience, projects, summary) in database.
+
+    Args:
+        resume_id: ID of resume to update.
+        updated_data: Dict containing updated fields.
+
+    Returns:
+        True if update successful.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    UPDATE resumes
+                    SET
+                        summary = COALESCE(%s, summary),
+                        experience = COALESCE(%s, experience),
+                        projects = COALESCE(%s, projects),
+                        updated_at = NOW()
+                    WHERE id = %s;
+                """
+                values = (
+                    updated_data.get('summary'),
+                    json.dumps(updated_data['experience']) if 'experience' in updated_data else None,
+                    json.dumps(updated_data['projects']) if 'projects' in updated_data else None,
+                    resume_id
+                )
+                cur.execute(sql, values)
+                conn.commit()
+                return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error updating resume: {e}")
+        return False
+
+
+def store_job_embedding(job_id: int, embedding_list: List[float]) -> bool:
+    """
+    Store embedding vector for a job listing.
+
+    Args:
+        job_id: ID of the job listing.
+        embedding_list: List of floats representing the embedding.
+
+    Returns:
+        True if successful.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    UPDATE job_listings
+                    SET description_embedding = %s
+                    WHERE id = %s;
+                """
+                cur.execute(sql, (embedding_list, job_id))
+                conn.commit()
+                return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error storing job embedding: {e}")
+        return False
+
+
+def store_resume_summary_embedding(resume_id: int, embedding_list: List[float]) -> bool:
+    """
+    Store summary embedding for a resume.
+
+    Args:
+        resume_id: ID of the resume.
+        embedding_list: List of floats representing the embedding.
+
+    Returns:
+        True if successful.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    UPDATE resumes
+                    SET summary_embedding = %s
+                    WHERE id = %s;
+                """
+                cur.execute(sql, (embedding_list, resume_id))
+                conn.commit()
+                return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error storing resume embedding: {e}")
+        return False
+
+
+def store_resume_embeddings(resume_id: int, resume: dict) -> bool:
+    """
+    Generate and store embeddings for all resume sections.
+    Uses content hash to skip unchanged sections.
+
+    Call this:
+    - After initial resume save
+    - After any section optimization is applied
+
+    Args:
+        resume_id: ID of the resume.
+        resume: Resume data dictionary.
+
+    Returns:
+        True if successful.
+    """
+    try:
+        # Import here to avoid circular imports
+        from embeddings import embed_text, text_hash
+
+        from text_utils import (
+            format_experience_text,
+            format_project_text,
+            format_skills_text
+        )
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                sections_to_embed = []
+
+                # Prepare experience sections
+                for i, exp in enumerate(resume.get('experience', []) or []):
+                    if exp:
+                        content = format_experience_text(exp)
+                        if content.strip():
+                            sections_to_embed.append(('experience', i, content))
+
+                # Prepare project sections
+                for i, proj in enumerate(resume.get('projects', []) or []):
+                    if proj:
+                        content = format_project_text(proj)
+                        if content.strip():
+                            sections_to_embed.append(('project', i, content))
+
+                # Prepare skills (single embedding for all skills)
+                skills = resume.get('skills', []) or []
+                if skills:
+                    content = format_skills_text(skills)
+                    if content.strip():
+                        sections_to_embed.append(('skills', 0, content))
+
+                # Update summary embedding directly on resumes table
+                if resume.get('summary'):
+                    summary_embedding = embed_text(resume['summary']).tolist()
+                    cur.execute(
+                        "UPDATE resumes SET summary_embedding = %s WHERE id = %s",
+                        (summary_embedding, resume_id)
+                    )
+
+                # Upsert each section embedding
+                for section_type, section_index, content in sections_to_embed:
+                    content_md5 = text_hash(content)
+                    embedding = embed_text(content).tolist()
+
+                    sql = """
+                        INSERT INTO resume_section_embeddings
+                        (resume_id, section_type, section_index, content_hash, embedding)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (resume_id, section_type, section_index)
+                        DO UPDATE SET
+                            content_hash = EXCLUDED.content_hash,
+                            embedding = EXCLUDED.embedding,
+                            created_at = NOW()
+                        WHERE resume_section_embeddings.content_hash != EXCLUDED.content_hash;
+                    """
+                    cur.execute(sql, (resume_id, section_type, section_index, content_md5, embedding))
+
+                conn.commit()
+                return True
+    except Exception as e:
+        print(f"Error storing section embeddings: {e}")
+        return False
+
+
+def check_embeddings_table_exists() -> bool:
+    """
+    Check if the resume_section_embeddings table exists.
+
+    Returns:
+        True if the table exists.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                        AND table_name = 'resume_section_embeddings'
+                    );
+                """)
+                return cur.fetchone()[0]
+    except Exception:
+        return False
+
+
+def check_pgvector_available() -> bool:
+    """
+    Check if pgvector extension is available.
+
+    Returns:
+        True if pgvector is installed and enabled.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM pg_extension WHERE extname = 'vector'
+                    );
+                """)
+                return cur.fetchone()[0]
+    except Exception:
+        return False

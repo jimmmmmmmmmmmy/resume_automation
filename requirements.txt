@@ -14,8 +14,24 @@ scikit-learn>=1.0.0
 
 # LLM Verification
 openai>=1.0.0
+jinja2>=3.0.0
+numpy>=1.20.0
 
 # Phase 3: Web Scraping
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+
+# Phase 3: Resume-Job Matching & Optimization
+# sentence-transformers already included above
+# jinja2 already included above
+# numpy already included above
+# openai already included above
+
+# Phase 3: PDF Export (optional - requires system dependencies)
+# weasyprint>=60.0  # Uncomment if you want PDF export
+# macOS: brew install cairo pango gdk-pixbuf libffi
+# Ubuntu: apt install libcairo2 libpango-1.0-0 libgdk-pixbuf2.0-0
+
+# pgvector for PostgreSQL vector similarity (install extension in PostgreSQL)
+# Run: CREATE EXTENSION IF NOT EXISTS vector;
